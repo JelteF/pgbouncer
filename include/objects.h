@@ -32,7 +32,6 @@ extern struct Slab *peer_pool_cache;
 extern struct Slab *pool_cache;
 extern struct Slab *user_cache;
 extern struct Slab *iobuf_cache;
-extern struct Slab *var_list_cache;
 
 PgDatabase *find_peer(int peer_id);
 PgDatabase *find_database(const char *name);
