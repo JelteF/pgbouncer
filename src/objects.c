@@ -1080,32 +1080,6 @@ void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...
 }
 
 /*
- * A wrapper around disconnect_client_sqlstate()
- *
- * The function disconnect_client_sqlstate() inherits the disconnect_client()
- * content and add a new option that provides a specific SQLSTATE that is
- * forwarded to client.  PgBouncer used to report SQLSTATE 08P01
- * (protocol_violation) for all cases but it diverges from what Postgres
- * reports in some cases.
- */
-void disconnect_client(PgSocket *client, bool notify, const char *reason, ...)
-{
-	if (reason) {
-		char buf[128];
-		va_list ap;
-
-		va_start(ap, reason);
-		vsnprintf(buf, sizeof(buf), reason, ap);
-		va_end(ap);
-
-		disconnect_client_sqlstate(client, notify, NULL, buf);
-	} else {
-		disconnect_client_sqlstate(client, notify, NULL, reason);
-	}
-
-}
-
-/*
  * close client connection
  *
  * notify=true means to send the reason message as an error to the
@@ -1113,9 +1087,19 @@ void disconnect_client(PgSocket *client, bool notify, const char *reason, ...)
  * protocol and communication errors where sending a regular error
  * message is not possible.
  */
-void disconnect_client_sqlstate(PgSocket *client, bool notify, const char *sqlstate, const char *reason)
+void disconnect_client(PgSocket *client, bool notify, const char *reason, ...)
 {
 	usec_t now = get_cached_time();
+
+	if (reason) {
+		char buf[128];
+		va_list ap;
+
+		va_start(ap, reason);
+		vsnprintf(buf, sizeof(buf), reason, ap);
+		va_end(ap);
+		reason = buf;
+	}
 
 	if (cf_log_disconnections && reason)
 		slog_info(client, "closing because: %s (age=%" PRIu64 "s)", reason,
@@ -1204,7 +1188,7 @@ void disconnect_client_sqlstate(PgSocket *client, bool notify, const char *sqlst
 		 * don't send Ready pkt here, or client won't notice
 		 * closed connection
 		 */
-		send_pooler_error(client, false, sqlstate, true, reason);
+		send_pooler_error(client, false, true, reason);
 	}
 
 	free_scram_state(&client->scram_state);
