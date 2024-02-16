@@ -457,7 +457,6 @@ class Postgres(QueryRunner):
         self.log_path = self.pgdata / "pg.log"
         self.connections = {}
         self.cursors = {}
-        self.restarted = False
 
     def initdb(self):
         run(
@@ -508,7 +507,6 @@ class Postgres(QueryRunner):
         self.port_lock.release()
 
     def restart(self):
-        self.restarted = True
         self.stop()
         self.start()
 
