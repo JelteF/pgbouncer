@@ -735,9 +735,11 @@ struct PgSocket {
 		bool adhoc;	/* SCRAM data made up from plain-text password */
 		int iterations;
 		char *salt;	/* base64-encoded */
-		uint8_t ClientKey[32];	/* SHA256_DIGEST_LENGTH */
-		uint8_t StoredKey[32];
-		uint8_t ServerKey[32];
+		uint8_t ClientKey[SCRAM_MAX_KEY_LEN];
+		uint8_t StoredKey[SCRAM_MAX_KEY_LEN];
+		uint8_t ServerKey[SCRAM_MAX_KEY_LEN];
+		pg_cryptohash_type hash_type;
+		pg_cryptohash_type key_length;
 	} scram_state;
 #ifdef HAVE_LDAP
 	char ldap_parameters[MAX_LDAP_CONFIG];

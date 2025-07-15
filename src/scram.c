@@ -26,6 +26,7 @@
 #include "common/base64.h"
 #include "common/saslprep.h"
 #include "common/scram-common.h"
+#include "common/hmac.h"
 
 
 static bool calculate_client_proof(ScramState *scram_state,
@@ -34,7 +35,7 @@ static bool calculate_client_proof(ScramState *scram_state,
 				   int saltlen,
 				   int iterations,
 				   const char *client_final_message_without_proof,
-				   uint8_t *result);
+				   uint8_t *result, const char **errstr);
 
 
 /*
@@ -296,6 +297,9 @@ char *build_client_first_message(ScramState *scram_state)
 	size_t len;
 	char *result = NULL;
 
+	scram_state->hash_type = PG_SHA256;
+	scram_state->key_length = SCRAM_SHA_256_KEY_LEN;
+
 	get_random_bytes(raw_nonce, SCRAM_RAW_NONCE_LEN);
 
 	encoded_len = pg_b64_enc_len(SCRAM_RAW_NONCE_LEN);
@@ -337,6 +341,7 @@ char *build_client_final_message(ScramState *scram_state,
 	size_t len;
 	uint8_t client_proof[SCRAM_SHA_256_KEY_LEN];
 	int enclen;
+	const char *errstr;
 
 	snprintf(buf, sizeof(buf), "c=biws,r=%s", server_nonce);
 
@@ -346,7 +351,7 @@ char *build_client_final_message(ScramState *scram_state,
 
 	if (!calculate_client_proof(scram_state, credentials,
 				    (uint8_t *) salt, saltlen, iterations, buf,
-				    client_proof))
+				    client_proof, &errstr))
 		goto failed;
 
 	len = strlcat(buf, ",p=", sizeof(buf));
@@ -471,21 +476,27 @@ failed:
 	return false;
 }
 
-static bool calculate_client_proof(ScramState *scram_state,
+static bool calculate_client_proof(ScramState *state,
 				   const PgCredentials *credentials,
 				   const uint8_t *salt,
 				   int saltlen,
 				   int iterations,
 				   const char *client_final_message_without_proof,
-				   uint8_t *result)
+				   uint8_t *result, const char **errstr)
 {
 	pg_saslprep_rc rc;
 	char *prep_password = NULL;
-	uint8_t StoredKey[SCRAM_SHA_256_KEY_LEN];
-	uint8_t ClientKey[SCRAM_SHA_256_KEY_LEN];
-	uint8_t ClientSignature[SCRAM_SHA_256_KEY_LEN];
-	scram_HMAC_ctx ctx;
-	const char *errstr = NULL;
+	uint8 StoredKey[SCRAM_MAX_KEY_LEN];
+	uint8 ClientKey[SCRAM_MAX_KEY_LEN];
+	uint8 ClientSignature[SCRAM_MAX_KEY_LEN];
+	int i;
+	pg_hmac_ctx *ctx;
+
+	ctx = pg_hmac_create(state->hash_type);
+	if (ctx == NULL) {
+		*errstr = pg_hmac_error(NULL);	/* returns OOM */
+		return false;
+	}
 
 	if (credentials->use_scram_keys) {
 		memcpy(ClientKey, credentials->scram_ClientKey, SCRAM_SHA_256_KEY_LEN);
@@ -499,75 +510,111 @@ static bool calculate_client_proof(ScramState *scram_state,
 			if (!prep_password)
 				return false;
 		}
-
-		scram_state->SaltedPassword = malloc(SCRAM_SHA_256_KEY_LEN);
-		if (scram_state->SaltedPassword == NULL)
+		state->SaltedPassword = malloc(SCRAM_SHA_256_KEY_LEN);
+		if (state->SaltedPassword == NULL)
 			goto failed;
-		scram_SaltedPassword(prep_password,
-				     PG_SHA256, SCRAM_SHA_256_KEY_LEN,
-				     salt,
-				     saltlen,
-				     iterations,
-				     scram_state->SaltedPassword,
-				     &errstr);
-
-		scram_ClientKey(scram_state->SaltedPassword, PG_SHA256, SCRAM_SHA_256_KEY_LEN, ClientKey, &errstr);
+		/*
+		 * Calculate SaltedPassword, and store it in 'state' so that we can
+		 * reuse it later in verify_server_signature.
+		 */
+		if (scram_SaltedPassword(prep_password, state->hash_type,
+					 state->key_length, salt, saltlen,
+					 state->iterations, state->SaltedPassword,
+					 errstr) < 0 ||
+		    scram_ClientKey(state->SaltedPassword, state->hash_type,
+				    state->key_length, ClientKey, errstr) < 0) {
+			/* errstr is already filled here */
+			pg_hmac_free(ctx);
+			return false;
+		}
 	}
 
-	scram_H(ClientKey, PG_SHA256, SCRAM_SHA_256_KEY_LEN, StoredKey, &errstr);
+	if (scram_H(ClientKey, state->hash_type, state->key_length, StoredKey, errstr) < 0) {
+		goto failed;
+	}
 
-	scram_HMAC_init(&ctx, StoredKey, SCRAM_SHA_256_KEY_LEN);
-	scram_HMAC_update(&ctx,
-			  scram_state->client_first_message_bare,
-			  strlen(scram_state->client_first_message_bare));
-	scram_HMAC_update(&ctx, ",", 1);
-	scram_HMAC_update(&ctx,
-			  scram_state->server_first_message,
-			  strlen(scram_state->server_first_message));
-	scram_HMAC_update(&ctx, ",", 1);
-	scram_HMAC_update(&ctx,
-			  client_final_message_without_proof,
-			  strlen(client_final_message_without_proof));
-	scram_HMAC_final(ClientSignature, &ctx);
+	if (pg_hmac_init(ctx, StoredKey, state->key_length) < 0 ||
+	    pg_hmac_update(ctx,
+			   (uint8 *) state->client_first_message_bare,
+			   strlen(state->client_first_message_bare)) < 0 ||
+	    pg_hmac_update(ctx, (uint8 *) ",", 1) < 0 ||
+	    pg_hmac_update(ctx,
+			   (uint8 *) state->server_first_message,
+			   strlen(state->server_first_message)) < 0 ||
+	    pg_hmac_update(ctx, (uint8 *) ",", 1) < 0 ||
+	    pg_hmac_update(ctx,
+			   (uint8 *) client_final_message_without_proof,
+			   strlen(client_final_message_without_proof)) < 0 ||
+	    pg_hmac_final(ctx, ClientSignature, state->key_length) < 0) {
+		*errstr = pg_hmac_error(ctx);
+		goto failed;
+	}
 
-	for (int i = 0; i < SCRAM_SHA_256_KEY_LEN; i++)
+	for (i = 0; i < state->key_length; i++)
 		result[i] = ClientKey[i] ^ ClientSignature[i];
 
 	free(prep_password);
+	pg_hmac_free(ctx);
 	return true;
 failed:
 	free(prep_password);
+	pg_hmac_free(ctx);
 	return false;
 }
 
-bool verify_server_signature(ScramState *scram_state, const PgCredentials *credentials, const char *ServerSignature)
+bool verify_server_signature(ScramState *state, const PgCredentials *credentials, const char *ServerSignature, bool *match, const char **errstr)
 {
-	uint8_t expected_ServerSignature[SCRAM_SHA_256_KEY_LEN];
-	uint8_t ServerKey[SCRAM_SHA_256_KEY_LEN];
-	scram_HMAC_ctx ctx;
-	const char *errstr = NULL;
+	uint8 expected_ServerSignature[SCRAM_MAX_KEY_LEN];
+	uint8 ServerKey[SCRAM_MAX_KEY_LEN];
+	pg_hmac_ctx *ctx;
 
-	if (credentials->use_scram_keys)
-		memcpy(ServerKey, credentials->scram_ServerKey, SCRAM_SHA_256_KEY_LEN);
-	else
-		scram_ServerKey(scram_state->SaltedPassword, PG_SHA256, SCRAM_SHA_256_KEY_LEN, ServerKey, &errstr);
 
-	scram_HMAC_init(&ctx, ServerKey, SCRAM_SHA_256_KEY_LEN);
-	scram_HMAC_update(&ctx,
-			  scram_state->client_first_message_bare,
-			  strlen(scram_state->client_first_message_bare));
-	scram_HMAC_update(&ctx, ",", 1);
-	scram_HMAC_update(&ctx,
-			  scram_state->server_first_message,
-			  strlen(scram_state->server_first_message));
-	scram_HMAC_update(&ctx, ",", 1);
-	scram_HMAC_update(&ctx,
-			  scram_state->client_final_message_without_proof,
-			  strlen(scram_state->client_final_message_without_proof));
-	scram_HMAC_final(expected_ServerSignature, &ctx);
-
-	if (memcmp(expected_ServerSignature, ServerSignature, SCRAM_SHA_256_KEY_LEN) != 0)
+	ctx = pg_hmac_create(state->hash_type);
+	if (ctx == NULL) {
+		*errstr = pg_hmac_error(NULL);	/* returns OOM */
 		return false;
+	}
+
+	if (credentials->use_scram_keys) {
+		memcpy(ServerKey, credentials->scram_ServerKey, SCRAM_SHA_256_KEY_LEN);
+	} else
+	{
+		if (scram_ServerKey(state->SaltedPassword, state->hash_type,
+				    state->key_length, ServerKey, errstr) < 0) {
+			/* errstr is filled already */
+			pg_hmac_free(ctx);
+			return false;
+		}
+	}
+
+	/* calculate ServerSignature */
+	if (pg_hmac_init(ctx, ServerKey, state->key_length) < 0 ||
+	    pg_hmac_update(ctx,
+			   (uint8 *) state->client_first_message_bare,
+			   strlen(state->client_first_message_bare)) < 0 ||
+	    pg_hmac_update(ctx, (uint8 *) ",", 1) < 0 ||
+	    pg_hmac_update(ctx,
+			   (uint8 *) state->server_first_message,
+			   strlen(state->server_first_message)) < 0 ||
+	    pg_hmac_update(ctx, (uint8 *) ",", 1) < 0 ||
+	    pg_hmac_update(ctx,
+			   (uint8 *) state->client_final_message_without_proof,
+			   strlen(state->client_final_message_without_proof)) < 0 ||
+	    pg_hmac_final(ctx, expected_ServerSignature,
+			  state->key_length) < 0) {
+		*errstr = pg_hmac_error(ctx);
+		pg_hmac_free(ctx);
+		return false;
+	}
+
+	pg_hmac_free(ctx);
+
+	/* signature processed, so now check after it */
+	if (memcmp(expected_ServerSignature, ServerSignature,
+		   state->key_length) != 0)
+		*match = false;
+	else
+		*match = true;
 
 	return true;
 }
@@ -935,22 +982,25 @@ static char *compute_server_signature(ScramState *state)
 	uint8_t ServerSignature[SCRAM_SHA_256_KEY_LEN];
 	char *server_signature_base64;
 	int siglen;
-	scram_HMAC_ctx ctx;
+	pg_hmac_ctx *ctx;
 
 	/* calculate ServerSignature */
-	scram_HMAC_init(&ctx, state->ServerKey, SCRAM_SHA_256_KEY_LEN);
-	scram_HMAC_update(&ctx,
-			  state->client_first_message_bare,
-			  strlen(state->client_first_message_bare));
-	scram_HMAC_update(&ctx, ",", 1);
-	scram_HMAC_update(&ctx,
-			  state->server_first_message,
-			  strlen(state->server_first_message));
-	scram_HMAC_update(&ctx, ",", 1);
-	scram_HMAC_update(&ctx,
-			  state->client_final_message_without_proof,
-			  strlen(state->client_final_message_without_proof));
-	scram_HMAC_final(ServerSignature, &ctx);
+	if (
+		pg_hmac_init(ctx, state->ServerKey, SCRAM_SHA_256_KEY_LEN) < 0 ||
+		pg_hmac_update(ctx,
+			       (uint8 *)state->client_first_message_bare,
+			       strlen(state->client_first_message_bare)) < 0 ||
+		pg_hmac_update(ctx, (uint8 *)",", 1) < 0 ||
+		pg_hmac_update(ctx,
+			       (uint8 *)state->server_first_message,
+			       strlen(state->server_first_message)) < 0 ||
+		pg_hmac_update(ctx, (uint8 *)",", 1) < 0 ||
+		pg_hmac_update(ctx,
+			       (uint8 *)state->client_final_message_without_proof,
+			       strlen(state->client_final_message_without_proof)) < 0 ||
+		pg_hmac_final(ctx, ServerSignature, &ctx) < 0) {
+		return NULL;
+	}
 
 	siglen = pg_b64_enc_len(SCRAM_SHA_256_KEY_LEN);
 	server_signature_base64 = malloc(siglen + 1);
@@ -1020,24 +1070,24 @@ bool verify_client_proof(ScramState *state, const char *ClientProof)
 {
 	uint8_t ClientSignature[SCRAM_SHA_256_KEY_LEN];
 	uint8_t client_StoredKey[SCRAM_SHA_256_KEY_LEN];
-	scram_HMAC_ctx ctx;
+	pg_hmac_ctx *ctx;
 	int i;
 	const char *errstr = NULL;
 
 	/* calculate ClientSignature */
-	scram_HMAC_init(&ctx, state->StoredKey, SCRAM_SHA_256_KEY_LEN);
-	scram_HMAC_update(&ctx,
-			  state->client_first_message_bare,
-			  strlen(state->client_first_message_bare));
-	scram_HMAC_update(&ctx, ",", 1);
-	scram_HMAC_update(&ctx,
-			  state->server_first_message,
-			  strlen(state->server_first_message));
-	scram_HMAC_update(&ctx, ",", 1);
-	scram_HMAC_update(&ctx,
-			  state->client_final_message_without_proof,
-			  strlen(state->client_final_message_without_proof));
-	scram_HMAC_final(ClientSignature, &ctx);
+	pg_hmac_init(ctx, state->StoredKey, SCRAM_SHA_256_KEY_LEN);
+	pg_hmac_update(ctx,
+		       state->client_first_message_bare,
+		       strlen(state->client_first_message_bare));
+	pg_hmac_update(ctx, ",", 1);
+	pg_hmac_update(ctx,
+		       state->server_first_message,
+		       strlen(state->server_first_message));
+	pg_hmac_update(ctx, ",", 1);
+	pg_hmac_update(ctx,
+		       state->client_final_message_without_proof,
+		       strlen(state->client_final_message_without_proof));
+	pg_hmac_final(ctx, ClientSignature, state->key_length);
 
 	/* Extract the ClientKey that the client calculated from the proof */
 	for (i = 0; i < SCRAM_SHA_256_KEY_LEN; i++)

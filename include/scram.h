@@ -50,7 +50,7 @@ bool read_server_first_message(PgSocket *server, char *input,
 			       char **server_nonce_p, char **salt_p, int *saltlen_p, int *iterations_p);
 bool read_server_final_message(PgSocket *server, char *input, char *ServerSignature);
 
-bool verify_server_signature(ScramState *scram_state, const PgCredentials *credentials, const char *ServerSignature);
+bool verify_server_signature(ScramState *scram_state, const PgCredentials *credentials, const char *ServerSignature, bool *match, const char **errstr);
 
 
 /*
