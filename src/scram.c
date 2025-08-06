@@ -393,7 +393,6 @@ bool read_server_first_message(PgSocket *server, char *input)
 	if (encoded_salt == NULL)
 		goto failed;
 
-	/* Decode and store binary salt */
 	saltlen = pg_b64_dec_len(strlen(encoded_salt));
 	salt = malloc(saltlen);
 	if (salt == NULL)
