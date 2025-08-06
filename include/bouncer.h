@@ -743,7 +743,7 @@ struct PgSocket {
 		uint8_t StoredKey[SCRAM_MAX_KEY_LEN];
 		uint8_t ServerKey[SCRAM_MAX_KEY_LEN];
 		pg_cryptohash_type hash_type;
-		pg_cryptohash_type key_length;
+		int key_length;
 	} scram_state;
 #ifdef HAVE_LDAP
 	char ldap_parameters[MAX_LDAP_CONFIG];
