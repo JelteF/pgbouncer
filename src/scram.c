@@ -972,7 +972,7 @@ failed:
 	return NULL;
 }
 
-static char *compute_server_signature(ScramState *state)
+static char *compute_server_signature(PgSocket *client, ScramState *state)
 {
 	uint8_t ServerSignature[SCRAM_SHA_256_KEY_LEN];
 	char *server_signature_base64;
@@ -980,8 +980,10 @@ static char *compute_server_signature(ScramState *state)
 	pg_hmac_ctx *ctx;
 
 	ctx = pg_hmac_create(state->hash_type);
-	if (ctx == NULL)
+	if (ctx == NULL) {
+		slog_error(client, "HMAC context creation failed: %s", pg_hmac_error(NULL));
 		return NULL;
+	}
 
 	/* calculate ServerSignature */
 	if (pg_hmac_init(ctx, state->ServerKey, state->key_length) < 0 ||
@@ -997,6 +999,7 @@ static char *compute_server_signature(ScramState *state)
 			   (uint8 *)state->client_final_message_without_proof,
 			   strlen(state->client_final_message_without_proof)) < 0 ||
 	    pg_hmac_final(ctx, ServerSignature, state->key_length) < 0) {
+		slog_error(client, "HMAC operation failed: %s", pg_hmac_error(ctx));
 		pg_hmac_free(ctx);
 		return NULL;
 	}
@@ -1020,13 +1023,13 @@ static char *compute_server_signature(ScramState *state)
 	return server_signature_base64;
 }
 
-char *build_server_final_message(ScramState *scram_state)
+char *build_server_final_message(PgSocket *client, ScramState *scram_state)
 {
 	char *server_signature = NULL;
 	size_t len;
 	char *result;
 
-	server_signature = compute_server_signature(scram_state);
+	server_signature = compute_server_signature(client, scram_state);
 	if (!server_signature)
 		goto failed;
 
@@ -1069,7 +1072,7 @@ bool verify_final_nonce(const ScramState *scram_state, const char *client_final_
 	return true;
 }
 
-bool verify_client_proof(ScramState *state, const char *ClientProof)
+bool verify_client_proof(PgSocket *client, ScramState *state, const char *ClientProof)
 {
 	uint8_t ClientSignature[SCRAM_SHA_256_KEY_LEN];
 	uint8_t client_StoredKey[SCRAM_SHA_256_KEY_LEN];
@@ -1078,8 +1081,10 @@ bool verify_client_proof(ScramState *state, const char *ClientProof)
 	const char *errstr = NULL;
 
 	ctx = pg_hmac_create(state->hash_type);
-	if (ctx == NULL)
+	if (ctx == NULL) {
+		slog_error(client, "HMAC context creation failed: %s", pg_hmac_error(NULL));
 		return false;
+	}
 
 	/* calculate ClientSignature */
 	if (pg_hmac_init(ctx, state->StoredKey, state->key_length) < 0 ||
@@ -1095,6 +1100,7 @@ bool verify_client_proof(ScramState *state, const char *ClientProof)
 			   (uint8 *)state->client_final_message_without_proof,
 			   strlen(state->client_final_message_without_proof)) < 0 ||
 	    pg_hmac_final(ctx, ClientSignature, state->key_length) < 0) {
+		slog_error(client, "HMAC operation failed: %s", pg_hmac_error(ctx));
 		pg_hmac_free(ctx);
 		return false;
 	}

@@ -64,11 +64,11 @@ bool read_client_final_message(PgSocket *client, const uint8_t *raw_input, char 
 char *build_server_first_message(ScramState *scram_state,
 				 PgCredentials *user, const char *stored_secret);
 
-char *build_server_final_message(ScramState *scram_state);
+char *build_server_final_message(PgSocket *client, ScramState *scram_state);
 
 bool verify_final_nonce(const ScramState *scram_state, const char *client_final_nonce);
 
-bool verify_client_proof(ScramState *state, const char *ClientProof);
+bool verify_client_proof(PgSocket *client, ScramState *state, const char *ClientProof);
 
 bool scram_verify_plain_password(PgSocket *client,
 				 const char *username, const char *password,
