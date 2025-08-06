@@ -839,11 +839,11 @@ failed:
  * SHA256 hash based on the username and an instance-level secret key.
  * Target buffer needs to be of size SCRAM_DEFAULT_SALT_LEN.
  */
-static void scram_mock_salt(const char *username, uint8_t *saltbuf)
+static bool scram_mock_salt(const char *username, uint8_t *saltbuf)
 {
 	static uint8_t mock_auth_nonce[32];
 	static bool mock_auth_nonce_initialized = false;
-	struct sha256_ctx ctx;
+	pg_cryptohash_ctx *ctx;
 	uint8_t sha_digest[PG_SHA256_DIGEST_LENGTH];
 
 	/*
@@ -859,12 +859,24 @@ static void scram_mock_salt(const char *username, uint8_t *saltbuf)
 		mock_auth_nonce_initialized = true;
 	}
 
-	sha256_reset(&ctx);
-	sha256_update(&ctx, (uint8_t *) username, strlen(username));
-	sha256_update(&ctx, mock_auth_nonce, sizeof(mock_auth_nonce));
-	sha256_final(&ctx, sha_digest);
+	ctx = pg_cryptohash_create(PG_SHA256);
+	if (!ctx) {
+		log_error("could not create cryptohash context");
+		return false;
+	}
 
+	if (pg_cryptohash_init(ctx) < 0 ||
+	    pg_cryptohash_update(ctx, (uint8_t *) username, strlen(username)) < 0 ||
+	    pg_cryptohash_update(ctx, mock_auth_nonce, sizeof(mock_auth_nonce)) < 0 ||
+	    pg_cryptohash_final(ctx, sha_digest, sizeof(sha_digest)) < 0) {
+		log_error("could not generate mock salt: %s", pg_cryptohash_error(ctx));
+		pg_cryptohash_free(ctx);
+		return false;
+	}
+
+	pg_cryptohash_free(ctx);
 	memcpy(saltbuf, sha_digest, SCRAM_DEFAULT_SALT_LEN);
+	return true;
 }
 
 static bool build_mock_scram_secret(const char *username, ScramState *scram_state)
@@ -874,7 +886,8 @@ static bool build_mock_scram_secret(const char *username, ScramState *scram_stat
 
 	scram_state->iterations = cf_scram_iterations;
 
-	scram_mock_salt(username, saltbuf);
+	if (!scram_mock_salt(username, saltbuf))
+		goto failed;
 	encoded_len = pg_b64_enc_len(sizeof(saltbuf));
 	scram_state->salt = malloc(encoded_len + 1);
 	if (!scram_state->salt)
