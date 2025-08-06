@@ -31,9 +31,6 @@
 
 static bool calculate_client_proof(ScramState *scram_state,
 				   const PgCredentials *credentials,
-				   const uint8_t *salt,
-				   int saltlen,
-				   int iterations,
 				   const char *client_final_message_without_proof,
 				   uint8_t *result, const char **errstr);
 
@@ -331,11 +328,7 @@ failed:
 }
 
 char *build_client_final_message(ScramState *scram_state,
-				 const PgCredentials *credentials,
-				 const char *server_nonce,
-				 const char *salt,
-				 int saltlen,
-				 int iterations)
+				 const PgCredentials *credentials)
 {
 	char buf[512];
 	size_t len;
@@ -343,16 +336,13 @@ char *build_client_final_message(ScramState *scram_state,
 	int enclen;
 	const char *errstr;
 
-	snprintf(buf, sizeof(buf), "c=biws,r=%s", server_nonce);
+	snprintf(buf, sizeof(buf), "c=biws,r=%s", scram_state->server_nonce);
 
 	scram_state->client_final_message_without_proof = strdup(buf);
 	if (scram_state->client_final_message_without_proof == NULL)
 		goto failed;
 
-	scram_state->iterations = iterations;
-
-	if (!calculate_client_proof(scram_state, credentials,
-				    (uint8_t *) salt, saltlen, iterations, buf,
+	if (!calculate_client_proof(scram_state, credentials, buf,
 				    client_proof, &errstr))
 		goto failed;
 
@@ -371,8 +361,7 @@ failed:
 	return NULL;
 }
 
-bool read_server_first_message(PgSocket *server, char *input,
-			       char **server_nonce_p, char **salt_p, int *saltlen_p, int *iterations_p)
+bool read_server_first_message(PgSocket *server, char *input)
 {
 	char *server_nonce;
 	char *encoded_salt;
@@ -396,9 +385,15 @@ bool read_server_first_message(PgSocket *server, char *input,
 		goto failed;
 	}
 
+	server->scram_state.server_nonce = strdup(server_nonce);
+	if (server->scram_state.server_nonce == NULL)
+		goto failed;
+
 	encoded_salt = read_attr_value(server, &input, 's');
 	if (encoded_salt == NULL)
 		goto failed;
+
+	/* Decode and store binary salt */
 	saltlen = pg_b64_dec_len(strlen(encoded_salt));
 	salt = malloc(saltlen);
 	if (salt == NULL)
@@ -410,6 +405,8 @@ bool read_server_first_message(PgSocket *server, char *input,
 		slog_error(server, "malformed SCRAM message (invalid salt)");
 		goto failed;
 	}
+	server->scram_state.salt = salt;
+	server->scram_state.saltlen = saltlen;
 
 	iterations_str = read_attr_value(server, &input, 'i');
 	if (iterations_str == NULL)
@@ -420,16 +417,13 @@ bool read_server_first_message(PgSocket *server, char *input,
 		slog_error(server, "malformed SCRAM message (invalid iteration count)");
 		goto failed;
 	}
+	server->scram_state.iterations = iterations;
 
 	if (*input != '\0') {
 		slog_error(server, "malformed SCRAM message (garbage at end of server-first-message)");
 		goto failed;
 	}
 
-	*server_nonce_p = server_nonce;
-	*salt_p = (char *)salt;
-	*saltlen_p = saltlen;
-	*iterations_p = iterations;
 	return true;
 failed:
 	free(salt);
@@ -480,9 +474,6 @@ failed:
 
 static bool calculate_client_proof(ScramState *state,
 				   const PgCredentials *credentials,
-				   const uint8_t *salt,
-				   int saltlen,
-				   int iterations,
 				   const char *client_final_message_without_proof,
 				   uint8_t *result, const char **errstr)
 {
@@ -520,7 +511,7 @@ static bool calculate_client_proof(ScramState *state,
 		 * reuse it later in verify_server_signature.
 		 */
 		if (scram_SaltedPassword(prep_password, state->hash_type,
-					 state->key_length, salt, saltlen,
+					 state->key_length, state->salt, state->saltlen,
 					 state->iterations, state->SaltedPassword,
 					 errstr) < 0 ||
 		    scram_ClientKey(state->SaltedPassword, state->hash_type,

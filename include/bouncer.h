@@ -729,21 +729,29 @@ struct PgSocket {
 	};
 
 	struct ScramState {
+		/* Common fields used in both client and server roles */
 		char *client_nonce;
 		char *client_first_message_bare;
 		char *client_final_message_without_proof;
 		char *server_nonce;
 		char *server_first_message;
+		int iterations;
+		pg_cryptohash_type hash_type;
+		int key_length;
+
+		/* Salt fields (stored in binary form, base64-encoded on the fly when needed) */
+		uint8_t *salt;	/* binary salt */
+		int saltlen;	/* length of salt */
+
+		/* Client-side fields (when PgBouncer connects to PostgreSQL) */
 		uint8_t *SaltedPassword;
+
+		/* Server-side fields (when clients connect to PgBouncer) */
 		char cbind_flag;
 		bool adhoc;	/* SCRAM data made up from plain-text password */
-		int iterations;
-		char *salt;	/* base64-encoded */
 		uint8_t ClientKey[SCRAM_MAX_KEY_LEN];
 		uint8_t StoredKey[SCRAM_MAX_KEY_LEN];
 		uint8_t ServerKey[SCRAM_MAX_KEY_LEN];
-		pg_cryptohash_type hash_type;
-		int key_length;
 	} scram_state;
 #ifdef HAVE_LDAP
 	char ldap_parameters[MAX_LDAP_CONFIG];
