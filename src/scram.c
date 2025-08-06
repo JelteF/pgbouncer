@@ -47,6 +47,7 @@ void free_scram_state(ScramState *scram_state)
 	free(scram_state->server_first_message);
 	free(scram_state->SaltedPassword);
 	free(scram_state->salt);
+	free(scram_state->encoded_salt);
 	memset(scram_state, 0, sizeof(*scram_state));
 }
 
@@ -811,13 +812,13 @@ static bool build_adhoc_scram_secret(const char *plain_password, ScramState *scr
 	scram_state->iterations = cf_scram_iterations;
 
 	encoded_len = pg_b64_enc_len(sizeof(saltbuf));
-	scram_state->salt = malloc(encoded_len + 1);
-	if (!scram_state->salt)
+	scram_state->encoded_salt = malloc(encoded_len + 1);
+	if (!scram_state->encoded_salt)
 		goto failed;
-	encoded_len = pg_b64_encode(saltbuf, sizeof(saltbuf), scram_state->salt, encoded_len);
+	encoded_len = pg_b64_encode(saltbuf, sizeof(saltbuf), scram_state->encoded_salt, encoded_len);
 	if (encoded_len < 0)
 		goto failed;
-	scram_state->salt[encoded_len] = '\0';
+	scram_state->encoded_salt[encoded_len] = '\0';
 
 	/* Calculate StoredKey and ServerKey */
 	scram_SaltedPassword(password, scram_state->hash_type, scram_state->key_length, saltbuf, sizeof(saltbuf),
@@ -889,13 +890,13 @@ static bool build_mock_scram_secret(const char *username, ScramState *scram_stat
 	if (!scram_mock_salt(username, saltbuf))
 		goto failed;
 	encoded_len = pg_b64_enc_len(sizeof(saltbuf));
-	scram_state->salt = malloc(encoded_len + 1);
-	if (!scram_state->salt)
+	scram_state->encoded_salt = malloc(encoded_len + 1);
+	if (!scram_state->encoded_salt)
 		goto failed;
-	encoded_len = pg_b64_encode(saltbuf, sizeof(saltbuf), scram_state->salt, encoded_len);
+	encoded_len = pg_b64_encode(saltbuf, sizeof(saltbuf), scram_state->encoded_salt, encoded_len);
 	if (encoded_len < 0)
 		goto failed;
-	scram_state->salt[encoded_len] = '\0';
+	scram_state->encoded_salt[encoded_len] = '\0';
 
 	return true;
 failed:
@@ -918,7 +919,7 @@ char *build_server_first_message(ScramState *scram_state, PgCredentials *user, c
 	} else {
 		if (user->adhoc_scram_secrets_cached) {
 			scram_state->iterations = user->scram_Iiterations;
-			scram_state->salt = strdup(user->scram_SaltKey);
+			scram_state->encoded_salt = strdup(user->scram_SaltKey);
 			memcpy(scram_state->StoredKey, user->scram_StoredKey, sizeof(user->scram_StoredKey));
 			memcpy(scram_state->ServerKey, user->scram_ServerKey, sizeof(user->scram_ServerKey));
 		} else {
@@ -926,7 +927,7 @@ char *build_server_first_message(ScramState *scram_state, PgCredentials *user, c
 			case PASSWORD_TYPE_SCRAM_SHA_256:
 				if (!parse_scram_secret(stored_secret,
 							&scram_state->iterations,
-							&scram_state->salt,
+							&scram_state->encoded_salt,
 							scram_state->StoredKey,
 							scram_state->ServerKey))
 					goto failed;
@@ -942,7 +943,7 @@ char *build_server_first_message(ScramState *scram_state, PgCredentials *user, c
 
 			if (!user->dynamic_passwd) {
 				user->scram_Iiterations = scram_state->iterations;
-				user->scram_SaltKey = strdup(scram_state->salt);
+				user->scram_SaltKey = strdup(scram_state->encoded_salt);
 				memcpy(user->scram_StoredKey, scram_state->StoredKey, sizeof(scram_state->StoredKey));
 				memcpy(user->scram_ServerKey, scram_state->ServerKey, sizeof(scram_state->ServerKey));
 				user->adhoc_scram_secrets_cached = true;
@@ -964,7 +965,7 @@ char *build_server_first_message(ScramState *scram_state, PgCredentials *user, c
 	       + strlen(scram_state->client_nonce)
 	       + strlen(scram_state->server_nonce)
 	       + 3
-	       + strlen(scram_state->salt)
+	       + strlen(scram_state->encoded_salt)
 	       + 3 + 10 + 1);
 	result = malloc(len);
 	if (!result)
@@ -973,7 +974,7 @@ char *build_server_first_message(ScramState *scram_state, PgCredentials *user, c
 		 "r=%s%s,s=%s,i=%u",
 		 scram_state->client_nonce,
 		 scram_state->server_nonce,
-		 scram_state->salt,
+		 scram_state->encoded_salt,
 		 scram_state->iterations);
 
 	scram_state->server_first_message = result;
