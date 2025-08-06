@@ -32,6 +32,10 @@
 #include <event2/event.h>
 #include <event2/event_struct.h>
 
+#include "common/postgres_compat.h"
+#include "common/cryptohash.h"
+#include "common/scram-common.h"
+
 /*
  * By default uthash exits the program when an allocation fails. But for some
  * of our hashmap usecases we don't want that. Luckily you can install your own
